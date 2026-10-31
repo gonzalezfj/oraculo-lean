@@ -1,0 +1,41 @@
+--- a/app/index.php	2026-10-31 03:29:11.709282364 +0000
++++ b/app/index.php	2026-10-31 03:29:11.711415194 +0000
+@@ -23,6 +23,10 @@
+ 
+ $amount = (int) ($_GET['amount'] ?? 0);
+ 
++// Cada pedido lee, decide y escribe dentro de una sola transacción que toma el lock de
++// escritura de entrada: así dos pedidos simultáneos se ejecutan uno después del otro.
++$db->exec('BEGIN IMMEDIATE');
++
+ switch (parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH)) {
+     case '/reset':
+         $db->exec(file_get_contents(__DIR__ . '/schema.sql'));
+@@ -52,10 +56,8 @@
+         } elseif ($amount > $card['balance']) {
+             reply('Insufficient');
+         } else {
+-            $db->beginTransaction();
+             $db->prepare('UPDATE cards SET balance = balance - ? WHERE id = 1')->execute([$amount]);
+             $db->prepare('INSERT INTO redemptions (card_id, amount) VALUES (1, ?)')->execute([$amount]);
+-            $db->commit();
+             reply('Ok');
+         }
+         break;
+@@ -72,10 +74,8 @@
+             reply('NothingToReverse');
+             break;
+         }
+-        $db->beginTransaction();
+         $db->prepare('UPDATE cards SET balance = balance + ? WHERE id = 1')->execute([$last['amount']]);
+         $db->prepare("UPDATE redemptions SET reversed_at = datetime('now') WHERE id = ?")->execute([$last['id']]);
+-        $db->commit();
+         reply('Ok');
+         break;
+ 
+@@ -93,3 +93,5 @@
+         http_response_code(404);
+         reply('not found');
+ }
++
++$db->exec('COMMIT');

@@ -13,8 +13,10 @@ sistema real por HTTP, y comparar las respuestas una por una (*lockstep testing*
 |---|---|
 | `Oraculo/Model.lean` | El modelo: una tarjeta es `available`, `sold` o `expired`, y `step` dice qué responde cada comando. |
 | `Oraculo/Proofs.lean` | **Lo que el original no tiene:** teoremas demostrados sobre el modelo. |
-| `test/Lockstep.lean` | La comparación: generador, adaptador HTTP (vía `curl`), shrinker y la propiedad "el sistema responde lo que responde el modelo". |
-| `app/`, `fixes/` | El "sistema real" (PHP + SQLite, con **dos bugs a propósito**) y los dos arreglos. Son del repo original, ver abajo. |
+| `Oraculo/Harness.lean` | Lo que comparten los dos tests: generador, adaptador HTTP (vía `curl`) y shrinkers. |
+| `test/Lockstep.lean` | La comparación secuencial: la propiedad "el sistema responde lo que responde el modelo". |
+| `test/Linearizable.lean` | **Nuevo:** la fase concurrente. Manda comandos a la vez y chequea que algún orden los explique. |
+| `app/`, `fixes/` | El "sistema real" (PHP + SQLite, con **dos bugs a propósito**) y los arreglos 1 y 2, del repo original. El `3-atomic-requests.diff` es de esta versión. |
 | `check.sh` | Repite toda la historia sobre una copia de la app. |
 
 ## Qué cambia respecto del original
@@ -27,9 +29,11 @@ sistema real por HTTP, y comparar las respuestas una por una (*lockstep testing*
 
 Dependen solo de `propext` y `Quot.sound`; no hay `sorry`. Así el oráculo deja de ser "lo que alguien escribió" y pasa a ser una especificación verificada. Eso no reemplaza el lockstep: los teoremas hablan del modelo, y el lockstep es el que lo compara con el sistema.
 
-**Sin librerías de testing.** El original usa QuickCheck. Acá el generador (`IO.rand`), el shrinker y el bucle son del proyecto, unas 150 líneas, porque la propiedad corre en `IO` (le pega a un servidor) y las librerías de property testing de Lean están pensadas para propiedades puras. El shrinker es más simple que el de QuickCheck: saca tramos de la secuencia y achica montos, pero no es tan fino.
+**Sin librerías de testing.** El original usa QuickCheck. Acá el generador (`IO.rand`), el shrinker y el bucle son del proyecto, porque la propiedad corre en `IO` (le pega a un servidor) y las librerías de property testing de Lean están pensadas para propiedades puras. El shrinker es más simple que el de QuickCheck: saca tramos de la secuencia y achica montos, pero no es tan fino.
 
 **Un `curl` por secuencia.** El adaptador manda `/reset` y todos los comandos en un solo proceso `curl`, que hace los pedidos de a uno y en orden. Sigue siendo un pedido HTTP por comando; solo evita lanzar un proceso por cada uno.
+
+**Una fase concurrente.** Ver más abajo.
 
 ## La historia que repite `check.sh`
 
@@ -61,9 +65,57 @@ Reverse       NothingToReverse    Ok   <--
 La app revierte la última redención sin chequear si ya estaba revertida: la misma plata vuelve
 dos veces. `fixes/2-double-reverse.diff` lo arregla.
 
-**Tercera corrida.** `+++ OK, passed 1000 tests.` Unos 45 segundos en total, incluyendo las tres corridas.
+**Tercera corrida.** `+++ OK, passed 1000 tests.`
 
 Las secuencias son aleatorias. La semilla se imprime al fallar, y con `SEED=42` se repite la misma corrida.
+
+## La fase concurrente
+
+Hasta acá todo es de a un pedido por vez, y la app pasa. `lake exe linearizable` hace lo que el
+lockstep secuencial no puede. Cada escenario tiene tres partes: un prefijo secuencial que arma el
+estado, una **ráfaga** de 2 a 4 comandos mandados todos a la vez (`curl --parallel-immediate`, una
+conexión por pedido) y un sufijo secuencial que mira lo que quedó.
+
+El criterio: el sistema es linealizable respecto del modelo si **existe algún orden** de los
+comandos de la ráfaga tal que el modelo, corrido en ese orden, responda lo mismo que el sistema,
+tanto en la ráfaga como en el sufijo. Se prueban todas las permutaciones (a lo sumo 24).
+
+**Cuarta corrida.** Con los arreglos 1 y 2 puestos, el servidor con varios workers
+(`PHP_CLI_SERVER_WORKERS`) y la misma app que acaba de pasar 1000 tests, aparece una carrera:
+
+```
+*** Failed! No linearization (after 41 scenarios and 6 shrinks, seed 1):
+prefix:     [Sell 1]
+concurrent: [Expire,Expire]
+then:       []
+
+phase       command       system
+prefix      Sell 1        Ok
+concurrent  Expire        Ok
+concurrent  Expire        Ok
+
+Ningún orden de los comandos concurrentes da eso. El modelo acepta solo:
+  Expire → Ok, Expire → IsExpired
+```
+
+Dos `Expire` simultáneos ven la tarjeta `sold` y los dos contestan `Ok`. En las dos semillas que
+probé (1 y 2) fue esta la primera carrera que apareció. El patrón se repite en todos los handlers
+de la app: leer el estado, decidir y escribir son pasos separados. Por ejemplo, dos `Reverse`
+simultáneos después de una redención pueden devolver la plata dos veces: probado a mano con `curl`,
+pasó en 7 de 20 intentos. `fixes/3-atomic-requests.diff` mete cada pedido en una transacción
+`BEGIN IMMEDIATE`, que toma el lock de escritura de entrada.
+
+**Quinta corrida.** `+++ OK, passed 200 scenarios (600 runs).` En una corrida más larga, de 600
+escenarios con 5 repeticiones cada uno (3000 corridas), tampoco apareció nada.
+
+Con `check.sh` toda la historia (cinco corridas) tarda un poco más de un minuto.
+
+**Qué garantiza y qué no.** La ráfaga se manda a la vez, pero no medimos cuándo empezó y terminó
+cada pedido, así que el chequeo da por superpuestos a todos los de la ráfaga. Eso solo debilita la
+condición: nunca da un falso fallo, pero puede dejar pasar una carrera. Y una carrera es cuestión
+de suerte, no de lógica: por eso cada escenario se repite varias veces (`REPS`, por defecto 3) y,
+al achicar, se repite hasta `SHRINK_REPS` veces antes de descartar un candidato. Que pase no
+demuestra que no haya carreras; que falle sí demuestra que las hay.
 
 ## Cómo correrlo
 
@@ -76,7 +128,14 @@ php -S localhost:8080 app/index.php   # o a mano: levantar la app...
 lake exe lockstep                     # ...y correr el lockstep contra ella
 ```
 
-Variables: `SUT` (URL base, por defecto `http://localhost:8080`), `TESTS` (cantidad, por defecto 1000), `SEED`.
+Para la fase concurrente, el servidor tiene que atender en paralelo (Linux o macOS):
+
+```sh
+PHP_CLI_SERVER_WORKERS=4 php -S localhost:8080 app/index.php
+lake exe linearizable
+```
+
+Variables: `SUT` (URL base, por defecto `http://localhost:8080`), `TESTS` (cantidad; 1000 en `lockstep`, 200 en `linearizable`), `SEED`; y solo para `linearizable`, `REPS` (repeticiones por escenario, 3) y `SHRINK_REPS` (15).
 
 Para chequear los teoremas: `lake build Oraculo`.
 
@@ -84,7 +143,8 @@ Para chequear los teoremas: `lake build Oraculo`.
 
 Es un juguete, a propósito.
 
-- **Una tarjeta, un cliente, un pedido a la vez.** El lockstep secuencial no ve condiciones de carrera: dos sucursales redimiendo el mismo código a la vez necesitan una fase paralela con chequeo de linealizabilidad.
+- **Una sola tarjeta.** Todo pasa sobre la tarjeta 1. Con varias tarjetas, las carreras entre tarjetas distintas (que no deberían interferir) no se prueban.
+- **La concurrencia es probabilística y de una sola ráfaga.** Ver arriba: no hay chequeo general de linealizabilidad con tiempos de inicio y fin, ni ráfagas con secuencias por cliente. Para eso hay herramientas hechas, como [Jepsen](https://jepsen.io)/Knossos, o el chequeo de linealizabilidad de [quickcheck-state-machine](https://hackage.haskell.org/package/quickcheck-state-machine) en Haskell.
 - **Los teoremas son sobre el modelo, no sobre el PHP.** Que el modelo sea correcto no dice que el sistema lo sea; para eso está el lockstep.
 - **Los bugs fueron plantados.** Son de los que aparecen en sistemas reales, pero acá se sabe dónde están.
 

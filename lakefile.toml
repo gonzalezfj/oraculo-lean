@@ -1,6 +1,6 @@
 name = "oraculo"
 version = "0.1.0"
-defaultTargets = ["lockstep"]
+defaultTargets = ["lockstep", "linearizable"]
 
 [[lean_lib]]
 name = "Oraculo"
@@ -8,4 +8,9 @@ name = "Oraculo"
 [[lean_exe]]
 name = "lockstep"
 root = "Lockstep"
+srcDir = "test"
+
+[[lean_exe]]
+name = "linearizable"
+root = "Linearizable"
 srcDir = "test"
