@@ -1,0 +1,11 @@
+name = "oraculo"
+version = "0.1.0"
+defaultTargets = ["lockstep"]
+
+[[lean_lib]]
+name = "Oraculo"
+
+[[lean_exe]]
+name = "lockstep"
+root = "Lockstep"
+srcDir = "test"
